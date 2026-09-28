@@ -1,0 +1,87 @@
+name: Build SmoothMotionHost
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check uploaded project files
+        shell: pwsh
+        run: |
+          $required = @("CMakeLists.txt", "host.cpp", "core.hpp", "core_tests.cpp", "README.md", "DEVELOPMENT.md", "VALIDATION.md", "run_without_sm86.cmd", "launch_with_sm86.cmd")
+          $missing = @($required | Where-Object { !(Test-Path -LiteralPath $_ -PathType Leaf) })
+          if ($missing.Count -gt 0) {
+            throw "Incomplete upload. Extract the ZIP and upload all its files to the repository root. Missing: $($missing -join ', ')"
+          }
+
+      - name: Check Windows SDK
+        shell: pwsh
+        run: |
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.26100.0\cppwinrt\winrt\Windows.Graphics.Capture.h"
+          if (!(Test-Path $sdk)) { throw "Windows SDK 10.0.26100.0 C++/WinRT headers are missing from this runner." }
+          Write-Host "Using Windows SDK 10.0.26100.0"
+
+      - name: Configure x64 MSVC
+        shell: cmd
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_SYSTEM_VERSION=10.0.26100.0"
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Test Release CLI and decision logic
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Build Debug
+        run: cmake --build build --config Debug --parallel
+
+      - name: Test Debug CLI and decision logic
+        run: ctest --test-dir build -C Debug --output-on-failure
+
+      - name: Stage release artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item build/Release/SmoothMotionHost.exe artifact/
+          Copy-Item run_without_sm86.cmd,launch_with_sm86.cmd,README.md,DEVELOPMENT.md,VALIDATION.md artifact/
+          @(
+            "Version: 0.4.0"
+            "Source commit: $env:GITHUB_SHA"
+            "Runner: windows-2022"
+            "Generator: Visual Studio 17 2022, x64"
+            "Windows SDK: 10.0.26100.0"
+            "Builds: Release and Debug completed in this workflow"
+            "Tests: CLI smoke tests and portable core regressions"
+            "Not tested by CI: live WGC capture, GPU performance, SM86 or displayed/generated FPS"
+          ) | Set-Content artifact/build-info.txt
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmoothMotionHost-v0.4.0-win-x64
+          path: artifact/
+          if-no-files-found: error
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmoothMotionHost-build-diagnostics
+          path: |
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/Testing/Temporary/*.log
+          if-no-files-found: ignore
